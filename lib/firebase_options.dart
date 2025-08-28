@@ -77,4 +77,5 @@ class DefaultFirebaseOptions {
     iosClientId: '607585428550-olg31j3j0n6oboag5n5lsuo9fh1p8q3d.apps.googleusercontent.com',
     iosBundleId: 'com.example.kerjaPraktekTugas',
   );
+
 }

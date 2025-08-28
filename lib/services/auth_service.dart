@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:bcrypt/bcrypt.dart';
 import 'firebase_service.dart';
 import '../models/user_model.dart';
 import 'storage_service.dart';
@@ -9,40 +10,59 @@ class AuthService {
   static final AuthService instance = AuthService._();
   AuthService._();
 
+  // ===== LOGIN =====
+  // - Query 1 kolom (username) => aman dari composite index
+  // - Verifikasi: passwordHash (bcrypt). Jika masih pakai 'password' (legacy),
+  //   cocokkan dulu, lalu MIGRASI: tulis passwordHash & hapus 'password'
   Future<UserModel?> login(String username, String password) async {
-    try {
-      final db = FirebaseService.instance.db;
+    final db = FirebaseService.instance.db;
 
-      // Query 1 field saja (username) → hindari composite index & error
-      final q = await db
-          .collection(FirebaseService.instance.usersCol)
-          .where('username', isEqualTo: username)
-          .limit(1)
-          .get();
+    final q = await db
+        .collection(FirebaseService.instance.usersCol)
+        .where('username', isEqualTo: username)
+        .limit(1)
+        .get();
 
-      if (q.docs.isEmpty) return null;
+    if (q.docs.isEmpty) return null;
 
-      final d = q.docs.first;
-      final data = d.data(); // Map<String, dynamic>
-      final user = UserModel.fromMap(d.id, data);
+    final d = q.docs.first;
+    final ref = db.collection(FirebaseService.instance.usersCol).doc(d.id);
+    final data = d.data();
 
-      // Manual verify password (manual auth)
-      if (user.password != password) return null;
+    final String? hash = data['passwordHash'] as String?;
+    if (hash != null && hash.isNotEmpty) {
+      if (!BCrypt.checkpw(password, hash)) return null;
+    } else {
+      // legacy plaintext
+      final legacy = (data['password'] ?? '') as String;
+      if (legacy != password) return null;
 
-      // Cache session
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('uid', user.id);
-      await prefs.setString('username', user.username);
-      await prefs.setString('role', user.role);
-      await prefs.setString('imageUrl', user.imageUrl ?? '');
-
-      return user;
-    } catch (e) {
-      // Lempar lagi biar UI bisa nampilin error & hentikan spinner
-      rethrow;
+      // Migrasi → simpan hash & hapus plaintext
+      final salt = BCrypt.gensalt();
+      final newHash = BCrypt.hashpw(password, salt);
+      await ref.update({
+        'passwordHash': newHash,
+        'password': FieldValue.delete(),
+        'updatedAt': DateTime.now(),
+      });
     }
+
+    // after-login: baca ulang, cache session
+    final fresh = await ref.get();
+    final user = UserModel.fromMap(fresh.id, fresh.data()!);
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('uid', user.id);
+    await prefs.setString('username', user.username);
+    await prefs.setString('role', user.role);
+    await prefs.setString('imageUrl', user.imageUrl ?? '');
+
+    return user;
   }
 
+  // ===== REGISTER =====
+  // - Simpan HANYA 'passwordHash' (bcrypt)
+  // - Tambah "sapu-bersih" setelah write: hapus field 'password' kalau ada (defense in depth)
   Future<String?> register({
     required String username,
     required String password,
@@ -66,17 +86,24 @@ class AuthService {
       imageUrl = await StorageService.instance.uploadProfileImage(imageFile, username);
     }
 
+    final salt = BCrypt.gensalt();
+    final hash = BCrypt.hashpw(password, salt);
     final now = DateTime.now();
-    await db.collection(FirebaseService.instance.usersCol).add({
+
+    // Tulis dokumen TANPA 'password'
+    final ref = await db.collection(FirebaseService.instance.usersCol).add({
       'username': username,
-      'password': password,
+      'passwordHash': hash,
       'role': role,
       'imageUrl': imageUrl,
       'createdAt': now,
       'updatedAt': now,
     });
 
-    return null; // null = sukses
+    // Sapu-bersih: kalau ada field 'password' (misal dari code path lama/trigger), hapus paksa.
+    await ref.update({'password': FieldValue.delete()});
+
+    return null; // sukses
   }
 
   Future<UserModel?> currentUser() async {
@@ -92,17 +119,16 @@ class AuthService {
         return null;
       }
       final user = UserModel.fromMap(doc.id, doc.data()!);
-      // refresh cache
       await prefs.setString('username', user.username);
       await prefs.setString('role', user.role);
       await prefs.setString('imageUrl', user.imageUrl ?? '');
       return user;
     } catch (_) {
-      // Kalau gagal (offline/rules), anggap belum login
       return null;
     }
   }
 
+  // UPDATE PROFILE: kalau ganti password → hash ulang, dan hapus 'password' plaintext jika masih ada
   Future<void> updateProfile({
     String? newUsername,
     String? newPassword,
@@ -113,11 +139,12 @@ class AuthService {
     if (uid == null) throw Exception('Not logged in');
 
     final db = FirebaseService.instance.db;
-    final snap = await db.collection(FirebaseService.instance.usersCol).doc(uid).get();
+    final ref = db.collection(FirebaseService.instance.usersCol).doc(uid);
+    final snap = await ref.get();
     if (!snap.exists) throw Exception('User not found');
     final data = snap.data()!;
-    String username = data['username'];
-    String password = data['password'];
+
+    String username = data['username'] ?? '';
     String? imageUrl = data['imageUrl'];
 
     if (newUsername != null && newUsername != username) {
@@ -131,20 +158,26 @@ class AuthService {
       }
       username = newUsername;
     }
-    if (newPassword != null && newPassword.length >= 4) {
-      password = newPassword;
-    }
+
     if (newImageFile != null) {
       imageUrl = await StorageService.instance.uploadProfileImage(newImageFile, username);
     }
 
-    final now = DateTime.now();
-    await db.collection(FirebaseService.instance.usersCol).doc(uid).update({
+    final payload = <String, dynamic>{
       'username': username,
-      'password': password,
       'imageUrl': imageUrl,
-      'updatedAt': now,
-    });
+      'updatedAt': DateTime.now(),
+      // hapus 'password' kalau masih ada kebawa dari masa lalu
+      'password': FieldValue.delete(),
+    };
+
+    if (newPassword != null && newPassword.length >= 4) {
+      final salt = BCrypt.gensalt();
+      final newHash = BCrypt.hashpw(newPassword, salt);
+      payload['passwordHash'] = newHash;
+    }
+
+    await ref.update(payload);
 
     await prefs.setString('username', username);
     await prefs.setString('imageUrl', imageUrl ?? '');
@@ -163,5 +196,28 @@ class AuthService {
       'imageUrl': prefs.getString('imageUrl'),
       'uid': prefs.getString('uid'),
     };
+  }
+
+  // (Opsional) Utility sekali jalan: migrasi semua user legacy (punya 'password') -> passwordHash
+  Future<int> migratePlaintextUsers() async {
+    final db = FirebaseService.instance.db;
+    final snap = await db.collection(FirebaseService.instance.usersCol).get();
+    int cnt = 0;
+    for (final d in snap.docs) {
+      final data = d.data();
+      final legacy = data['password'] as String?;
+      final already = data['passwordHash'] as String?;
+      if (legacy != null && (already == null || already.isEmpty)) {
+        final salt = BCrypt.gensalt();
+        final newHash = BCrypt.hashpw(legacy, salt);
+        await db.collection(FirebaseService.instance.usersCol).doc(d.id).update({
+          'passwordHash': newHash,
+          'password': FieldValue.delete(),
+          'updatedAt': DateTime.now(),
+        });
+        cnt++;
+      }
+    }
+    return cnt;
   }
 }
