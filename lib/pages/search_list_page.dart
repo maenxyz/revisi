@@ -18,17 +18,16 @@ class SearchListPage extends StatelessWidget {
       appBar: AppBar(title: const Text('Search Results'), actions: const [AppBarActions()]),
       body: LayoutBuilder(
         builder: (context, constraints) {
-          // Lebar 1 kartu dalam grid
-          final itemWidth = (constraints.maxWidth - (spacing * (crossAxisCount - 1))) / crossAxisCount;
+          // Lebar 1 kartu
+          final itemWidth =
+              (constraints.maxWidth - (spacing * (crossAxisCount - 1))) / crossAxisCount;
 
-          // Gambar square -> tinggi = itemWidth
-          // Tambahkan tinggi area teks (perkiraan) supaya cukup:
-          // (padding 10*2) + 3 baris teks ~ 18*3 + jarak 6*2 ≈ ~90–110
-          // Pakai 110 agar aman untuk font besar/locale.
-          const textAreaHeight = 110.0;
+          // Karena TANPA gambar, tinggi kartu cukup area teks saja.
+          // Estimasi tinggi teks + padding: ~120 px (aman untuk 2 baris ID, harga, stock).
+          const textOnlyHeight = 120.0;
 
           // childAspectRatio = width / height
-          final childAspectRatio = itemWidth / (itemWidth + textAreaHeight);
+          final childAspectRatio = itemWidth / textOnlyHeight;
 
           return Padding(
             padding: const EdgeInsets.all(12),
@@ -43,6 +42,7 @@ class SearchListPage extends StatelessWidget {
               itemBuilder: (_, i) => ProductCard(
                 product: items[i],
                 onTap: () => Navigator.of(context).pushNamed('/product', arguments: items[i]),
+                showImage: false, // <-- SEMBUNYIKAN GAMBAR DI HASIL SEARCH
               ),
             ),
           );

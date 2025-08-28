@@ -10,7 +10,7 @@ import 'pages/add_product_page.dart';
 import 'pages/edit_product_page.dart';
 import 'pages/edit_profile_page.dart';
 import 'services/auth_service.dart';
-
+// import 'package:bcrypt/bcrypt.dart'
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
