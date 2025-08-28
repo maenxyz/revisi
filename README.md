@@ -17,6 +17,11 @@ revisi
 
 
 ________________________________________________________
+untuk depedensi nya ketik di terminal:
+
+
 flutter pub global activate flutterfire_cli
+
 flutterfire configure
+
 flutter pub get
